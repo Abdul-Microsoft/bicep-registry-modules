@@ -100,10 +100,6 @@ param apiContainerImageName string = 'contentprocessorapi'
 @description('Optional. The Container Image Tag to deploy on the backend.')
 param apiContainerImageTag string = 'latest'
 
-// ========== Solution Prefix Variable ========== //
-@description('Optional. A unique deployment timestamp for solution prefix generation.')
-param deploymentTimestamp string = utcNow()
-
 @description('Optional. Size of the Jumpbox Virtual Machine when created. Set to custom value if enablePrivateNetworking is true.')
 param vmSize string?
 
@@ -186,7 +182,7 @@ module virtualNetwork './modules/virtualNetwork.bicep' = if (enablePrivateNetwor
 
 // Azure Bastion Host
 var bastionHostName = 'bas-${solutionSuffix}'
-module bastionHost 'br/public:avm/res/network/bastion-host:0.6.1' = if (enablePrivateNetworking) {
+module bastionHost 'br/public:avm/res/network/bastion-host:0.8.0' = if (enablePrivateNetworking) {
   name: take('avm.res.network.bastion-host.${bastionHostName}', 64)
   params: {
     name: bastionHostName
@@ -211,13 +207,13 @@ module bastionHost 'br/public:avm/res/network/bastion-host:0.6.1' = if (enablePr
     enableTelemetry: enableTelemetry
     publicIPAddressObject: {
       name: 'pip-${bastionHostName}'
-      zones: []
+      availabilityZones: []
     }
   }
 }
 // Jumpbox Virtual Machine
 var jumpboxVmName = take('vm-jumpbox-${solutionSuffix}', 15)
-module jumpboxVM 'br/public:avm/res/compute/virtual-machine:0.15.0' = if (enablePrivateNetworking) {
+module jumpboxVM 'br/public:avm/res/compute/virtual-machine:0.20.0' = if (enablePrivateNetworking) {
   name: take('avm.res.compute.virtual-machine.${jumpboxVmName}', 64)
   params: {
     name: take(jumpboxVmName, 15) // Shorten VM name to 15 characters to avoid Azure limits
@@ -226,7 +222,8 @@ module jumpboxVM 'br/public:avm/res/compute/virtual-machine:0.15.0' = if (enable
     adminUsername: vmAdminUsername ?? 'JumpboxAdminUser'
     adminPassword: vmAdminPassword ?? 'JumpboxAdminP@ssw0rd1234!'
     tags: tags
-    zone: 0
+    availabilityZone: -1
+    maintenanceConfigurationResourceId: maintenanceConfiguration.outputs.resourceId
     imageReference: {
       offer: 'WindowsServer'
       publisher: 'MicrosoftWindowsServer'
@@ -276,6 +273,42 @@ module jumpboxVM 'br/public:avm/res/compute/virtual-machine:0.15.0' = if (enable
   }
 }
 
+module maintenanceConfiguration 'br/public:avm/res/maintenance/maintenance-configuration:0.3.2' = {
+  name: take('${jumpboxVmName}-jumpbox-maintenance-config', 64)
+  params: {
+    name: 'mc-${jumpboxVmName}'
+    location: location
+    tags: tags
+    enableTelemetry: enableTelemetry
+    extensionProperties: {
+      InGuestPatchMode: 'User'
+    }
+    maintenanceScope: 'InGuestPatch'
+    maintenanceWindow: {
+      startDateTime: '2024-06-16 00:00'
+      duration: '03:55'
+      timeZone: 'W. Europe Standard Time'
+      recurEvery: '1Day'
+    }
+    visibility: 'Custom'
+    installPatches: {
+      rebootSetting: 'IfRequired'
+      windowsParameters: {
+        classificationsToInclude: [
+          'Critical'
+          'Security'
+        ]
+      }
+      linuxParameters: {
+        classificationsToInclude: [
+          'Critical'
+          'Security'
+        ]
+      }
+    }
+  }
+}
+
 // ========== Private DNS Zones ========== //
 var privateDnsZones = [
   'privatelink.cognitiveservices.azure.com'
@@ -311,7 +344,7 @@ var dnsZoneIndex = {
 }
 
 @batchSize(5)
-module avmPrivateDnsZones 'br/public:avm/res/network/private-dns-zone:0.7.1' = [
+module avmPrivateDnsZones 'br/public:avm/res/network/private-dns-zone:0.8.0' = [
   for (zone, i) in privateDnsZones: if (enablePrivateNetworking) {
     name: take('avm.res.network.private-dns-zone.${split(zone, '.')[1]}', 64)
     params: {
@@ -392,7 +425,7 @@ module logAnalyticsWorkspace 'br/public:avm/res/operational-insights/workspace:0
   }
 }
 
-module applicationInsights 'br/public:avm/res/insights/component:0.6.0' = if (enableMonitoring) {
+module applicationInsights 'br/public:avm/res/insights/component:0.6.1' = if (enableMonitoring) {
   name: take('avm.res.insights.component.${solutionSuffix}', 64)
   params: {
     name: 'appi-${solutionSuffix}'
@@ -410,7 +443,7 @@ param createdBy string = contains(deployer(), 'userPrincipalName')
   : deployer().objectId
 
 // ========== Resource Group Tag ========== //
-resource resourceGroupTags 'Microsoft.Resources/tags@2021-04-01' = {
+resource resourceGroupTags 'Microsoft.Resources/tags@2025-04-01' = {
   name: 'default'
   properties: {
     tags: {
@@ -480,7 +513,7 @@ module avmContainerRegistry 'modules/container-registry.bicep' = {
 }
 
 // // ========== Storage Account ========== //
-module avmStorageAccount 'br/public:avm/res/storage/storage-account:0.20.0' = {
+module avmStorageAccount 'br/public:avm/res/storage/storage-account:0.27.1' = {
   name: take('module.storage-account.${solutionSuffix}', 64)
   params: {
     name: 'st${replace(solutionSuffix, '-', '')}'
@@ -536,11 +569,11 @@ module avmStorageAccount 'br/public:avm/res/storage/storage-account:0.20.0' = {
               privateDnsZoneGroupConfigs: [
                 {
                   name: 'storage-dns-zone-group-blob'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.storageBlob].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.storageBlob]!.outputs.resourceId
                 }
               ]
             }
-            subnetResourceId: virtualNetwork.outputs.backendSubnetResourceId // Use the backend subnet
+            subnetResourceId: virtualNetwork!.outputs.backendSubnetResourceId // Use the backend subnet
             service: 'blob'
           }
           {
@@ -550,11 +583,11 @@ module avmStorageAccount 'br/public:avm/res/storage/storage-account:0.20.0' = {
               privateDnsZoneGroupConfigs: [
                 {
                   name: 'storage-dns-zone-group-queue'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.storageQueue].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.storageQueue]!.outputs.resourceId
                 }
               ]
             }
-            subnetResourceId: virtualNetwork.outputs.backendSubnetResourceId // Use the backend subnet
+            subnetResourceId: virtualNetwork!.outputs.backendSubnetResourceId // Use the backend subnet
             service: 'queue'
           }
         ]
@@ -626,19 +659,19 @@ module avmAiServices 'modules/account/aifoundry.bicep' = {
               privateDnsZoneGroupConfigs: [
                 {
                   name: 'ai-services-dns-zone-cognitiveservices'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cognitiveServices].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cognitiveServices]!.outputs.resourceId
                 }
                 {
                   name: 'ai-services-dns-zone-openai'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.openAI].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.openAI]!.outputs.resourceId
                 }
                 {
                   name: 'ai-services-dns-zone-aiservices'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.aiServices].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.aiServices]!.outputs.resourceId
                 }
                 {
                   name: 'ai-services-dns-zone-contentunderstanding'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.contentUnderstanding].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.contentUnderstanding]!.outputs.resourceId
                 }
               ]
             }
@@ -649,7 +682,7 @@ module avmAiServices 'modules/account/aifoundry.bicep' = {
   }
 }
 
-module avmAiServices_cu 'br/public:avm/res/cognitive-services/account:0.11.0' = {
+module avmAiServices_cu 'br/public:avm/res/cognitive-services/account:0.13.2' = {
   name: take('avm.res.cognitive-services.account.content-understanding.${solutionSuffix}', 64)
 
   params: {
@@ -688,20 +721,20 @@ module avmAiServices_cu 'br/public:avm/res/cognitive-services/account:0.11.0' = 
           {
             name: 'pep-aicu-${solutionSuffix}'
             customNetworkInterfaceName: 'nic-aicu-${solutionSuffix}'
-            privateEndpointResourceId: virtualNetwork.outputs.resourceId
+            privateEndpointResourceId: virtualNetwork!.outputs.resourceId
             privateDnsZoneGroup: {
               privateDnsZoneGroupConfigs: [
                 {
                   name: 'aicu-dns-zone-cognitiveservices'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cognitiveServices].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cognitiveServices]!.outputs.resourceId
                 }
                 {
                   name: 'aicu-dns-zone-contentunderstanding'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.contentUnderstanding].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.contentUnderstanding]!.outputs.resourceId
                 }
               ]
             }
-            subnetResourceId: virtualNetwork.outputs.backendSubnetResourceId // Use the backend subnet
+            subnetResourceId: virtualNetwork!.outputs.backendSubnetResourceId // Use the backend subnet
           }
         ]
       : []
@@ -709,7 +742,7 @@ module avmAiServices_cu 'br/public:avm/res/cognitive-services/account:0.11.0' = 
 }
 
 // ========== Container App Environment ========== //
-module avmContainerAppEnv 'br/public:avm/res/app/managed-environment:0.11.2' = {
+module avmContainerAppEnv 'br/public:avm/res/app/managed-environment:0.11.3' = {
   name: take('avm.res.app.managed-environment.${solutionSuffix}', 64)
   params: {
     name: 'cae-${solutionSuffix}'
@@ -749,7 +782,7 @@ module avmContainerAppEnv 'br/public:avm/res/app/managed-environment:0.11.2' = {
 }
 
 // //=========== Managed Identity for Container Registry ========== //
-module avmContainerRegistryReader 'br/public:avm/res/managed-identity/user-assigned-identity:0.4.1' = {
+module avmContainerRegistryReader 'br/public:avm/res/managed-identity/user-assigned-identity:0.4.2' = {
   name: take('avm.res.managed-identity.user-assigned-identity.${solutionSuffix}', 64)
   params: {
     name: 'id-acr-${solutionSuffix}'
@@ -760,7 +793,7 @@ module avmContainerRegistryReader 'br/public:avm/res/managed-identity/user-assig
 }
 
 // ========== Container App  ========== //
-module avmContainerApp 'br/public:avm/res/app/container-app:0.17.0' = {
+module avmContainerApp 'br/public:avm/res/app/container-app:0.19.0' = {
   name: take('avm.res.app.container-app.${solutionSuffix}', 64)
   params: {
     name: 'ca-${solutionSuffix}-app'
@@ -790,7 +823,7 @@ module avmContainerApp 'br/public:avm/res/app/container-app:0.17.0' = {
         image: '${publicContainerImageEndpoint}/${appContainerImageName}:${appContainerImageTag}'
 
         resources: {
-          cpu: '4'
+          cpu: 4
           memory: '8.0Gi'
         }
         env: [
@@ -817,7 +850,7 @@ module avmContainerApp 'br/public:avm/res/app/container-app:0.17.0' = {
 }
 
 // ========== Container App API ========== //
-module avmContainerApp_API 'br/public:avm/res/app/container-app:0.17.0' = {
+module avmContainerApp_API 'br/public:avm/res/app/container-app:0.19.0' = {
   name: take('avm.res.app.container-app-api.${solutionSuffix}', 64)
   params: {
     name: 'ca-${solutionSuffix}-api'
@@ -847,7 +880,7 @@ module avmContainerApp_API 'br/public:avm/res/app/container-app:0.17.0' = {
           ? '${publicContainerImageEndpoint}/${apiContainerImageName}:${apiContainerImageTag}'
           : avmContainerRegistry.outputs.loginServer
         resources: {
-          cpu: '4'
+          cpu: 4
           memory: '8.0Gi'
         }
         env: [
@@ -937,7 +970,7 @@ module avmContainerApp_API 'br/public:avm/res/app/container-app:0.17.0' = {
 }
 
 //========== Container App Web ========== //
-module avmContainerApp_Web 'br/public:avm/res/app/container-app:0.17.0' = {
+module avmContainerApp_Web 'br/public:avm/res/app/container-app:0.19.0' = {
   name: take('avm.res.app.container-app-web.${solutionSuffix}', 64)
   params: {
     name: 'ca-${solutionSuffix}-web'
@@ -984,7 +1017,7 @@ module avmContainerApp_Web 'br/public:avm/res/app/container-app:0.17.0' = {
           ? '${publicContainerImageEndpoint}/${webContainerImageName}:${webContainerImageTag}'
           : avmContainerRegistry.outputs.loginServer
         resources: {
-          cpu: '4'
+          cpu: 4
           memory: '8.0Gi'
         }
         env: [
@@ -1019,7 +1052,7 @@ module avmContainerApp_Web 'br/public:avm/res/app/container-app:0.17.0' = {
 }
 
 // ========== Cosmos Database for Mongo DB ========== //
-module avmCosmosDB 'br/public:avm/res/document-db/database-account:0.15.0' = {
+module avmCosmosDB 'br/public:avm/res/document-db/database-account:0.18.0' = {
   name: take('avm.res.document-db.database-account.${solutionSuffix}', 64)
   params: {
     name: 'cosmos-${solutionSuffix}'
@@ -1033,7 +1066,7 @@ module avmCosmosDB 'br/public:avm/res/document-db/database-account:0.15.0' = {
     tags: tags
     enableTelemetry: enableTelemetry
     databaseAccountOfferType: 'Standard'
-    automaticFailover: false
+    enableAutomaticFailover: false
     serverVersion: '7.0'
     capabilitiesToAdd: [
       'EnableMongo'
@@ -1061,7 +1094,7 @@ module avmCosmosDB 'br/public:avm/res/document-db/database-account:0.15.0' = {
               privateDnsZoneGroupConfigs: [
                 {
                   name: 'cosmosdb-dns-zone-group'
-                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cosmosDB].outputs.resourceId
+                  privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.cosmosDB]!.outputs.resourceId
                 }
               ]
             }
@@ -1074,7 +1107,7 @@ module avmCosmosDB 'br/public:avm/res/document-db/database-account:0.15.0' = {
 }
 
 // ========== App Configuration ========== //
-module avmAppConfig 'br/public:avm/res/app-configuration/configuration-store:0.6.3' = {
+module avmAppConfig 'br/public:avm/res/app-configuration/configuration-store:0.9.2' = {
   name: take('avm.res.app.configuration-store.${solutionSuffix}', 64)
   params: {
     name: 'appcs-${solutionSuffix}'
@@ -1101,7 +1134,7 @@ module avmAppConfig 'br/public:avm/res/app-configuration/configuration-store:0.6
         ]
       : null
     disableLocalAuth: false
-    replicaLocations: (resourceGroupLocation != secondaryLocation) ? [secondaryLocation] : []
+    replicaLocations: (resourceGroupLocation != secondaryLocation) ? [{ replicaLocation: secondaryLocation }] : []
     roleAssignments: [
       {
         principalId: avmContainerApp.outputs.?systemAssignedMIPrincipalId!
@@ -1226,7 +1259,7 @@ module avmAppConfig 'br/public:avm/res/app-configuration/configuration-store:0.6
   }
 }
 
-module avmAppConfig_update 'br/public:avm/res/app-configuration/configuration-store:0.6.3' = if (enablePrivateNetworking) {
+module avmAppConfig_update 'br/public:avm/res/app-configuration/configuration-store:0.9.2' = if (enablePrivateNetworking) {
   name: take('avm.res.app.configuration-store.update.${solutionSuffix}', 64)
   params: {
     name: 'appcs-${solutionSuffix}'
@@ -1242,7 +1275,7 @@ module avmAppConfig_update 'br/public:avm/res/app-configuration/configuration-st
           privateDnsZoneGroupConfigs: [
             {
               name: 'appconfig-dns-zone-group'
-              privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.appConfig].outputs.resourceId
+              privateDnsZoneResourceId: avmPrivateDnsZones[dnsZoneIndex.appConfig]!.outputs.resourceId
             }
           ]
         }
@@ -1257,7 +1290,7 @@ module avmAppConfig_update 'br/public:avm/res/app-configuration/configuration-st
 }
 
 // ========== Container App Update Modules ========== //
-module avmContainerApp_update 'br/public:avm/res/app/container-app:0.17.0' = {
+module avmContainerApp_update 'br/public:avm/res/app/container-app:0.19.0' = {
   name: take('avm.res.app.container-app-update.${solutionSuffix}', 64)
   params: {
     name: 'ca-${solutionSuffix}-app'
@@ -1287,7 +1320,7 @@ module avmContainerApp_update 'br/public:avm/res/app/container-app:0.17.0' = {
         image: '${publicContainerImageEndpoint}/contentprocessor:latest'
 
         resources: {
-          cpu: '4'
+          cpu: 4
           memory: '8.0Gi'
         }
         env: [
@@ -1324,7 +1357,7 @@ module avmContainerApp_update 'br/public:avm/res/app/container-app:0.17.0' = {
   }
 }
 
-module avmContainerApp_API_update 'br/public:avm/res/app/container-app:0.17.0' = {
+module avmContainerApp_API_update 'br/public:avm/res/app/container-app:0.19.0' = {
   name: take('avm.res.app.container-app-api.update.${solutionSuffix}', 64)
   params: {
     name: 'ca-${solutionSuffix}-api'
@@ -1355,7 +1388,7 @@ module avmContainerApp_API_update 'br/public:avm/res/app/container-app:0.17.0' =
           ? '${publicContainerImageEndpoint}/${apiContainerImageName}:${apiContainerImageTag}'
           : avmContainerRegistry.outputs.loginServer
         resources: {
-          cpu: '4'
+          cpu: 4
           memory: '8.0Gi'
         }
         env: [
