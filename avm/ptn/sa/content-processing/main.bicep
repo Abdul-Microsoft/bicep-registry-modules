@@ -13,7 +13,7 @@ param solutionName string = 'cps'
 param location string = resourceGroup().location
 
 @minLength(1)
-@description('Location for the Azure AI Content Understanding service deployment:')
+@description('Optional. Location for the Azure AI Content Understanding service deployment:')
 @allowed(['WestUS', 'SwedenCentral', 'AustraliaEast'])
 @metadata({
   azd: {
@@ -22,6 +22,7 @@ param location string = resourceGroup().location
 })
 param contentUnderstandingLocation string = 'WestUS'
 
+@description('Optional. Location for the Azure AI Services deployment:')
 @metadata({
   azd: {
     type: 'location'
@@ -437,7 +438,7 @@ module applicationInsights 'br/public:avm/res/insights/component:0.6.1' = if (en
     disableLocalAuth: true
   }
 }
-@description('Tag, Created by user name')
+@description('Optional. Tag, Created by user name')
 param createdBy string = contains(deployer(), 'userPrincipalName')
   ? split(deployer().userPrincipalName, '@')[0]
   : deployer().objectId
